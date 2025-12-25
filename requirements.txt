@@ -1,0 +1,5 @@
+apache-flink==1.19.3
+apache-flink-libraries==1.19.3
+kafka-python==2.0.2
+simpy==4.0.1
+
