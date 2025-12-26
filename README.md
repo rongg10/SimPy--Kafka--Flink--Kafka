@@ -76,6 +76,11 @@ python simpy_message_generator.py --count 5 --interval 50 --realtime --print-msg
 - `--topic NAME`: Kafka topic to publish to (default: `test-topic` or `KAFKA_TOPIC` env).
 - `--bootstrap HOSTS`: Kafka bootstrap servers (default: `localhost:9092` or `KAFKA_BOOTSTRAP` env).
 
+Message delivery delay is sampled from a chi-square distribution and capped:
+
+- Defaults: `SIMPY_DELAY_CHISQ_DF=2.0`, `SIMPY_DELAY_SCALE_MS=1000`, `SIMPY_MAX_DELAY_MS=30000`.
+- Each log entry is delayed by `chisq(df) * scale`, then capped at `SIMPY_MAX_DELAY_MS` to simulate out-of-order delivery.
+
 ### 4) Watch output
 ```bash
 # Tail

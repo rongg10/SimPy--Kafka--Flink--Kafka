@@ -21,6 +21,9 @@ random.seed(42)
 
 DEFAULT_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
 DEFAULT_TOPIC = os.getenv("KAFKA_TOPIC", "test-topic")
+DELAY_MAX_MS = int(os.getenv("SIMPY_MAX_DELAY_MS", "30000"))
+DELAY_CHISQ_DF = float(os.getenv("SIMPY_DELAY_CHISQ_DF", "2.0"))
+DELAY_SCALE_MS = float(os.getenv("SIMPY_DELAY_SCALE_MS", "1000"))
 
 # Kafka Producer Configuration
 producer = None
@@ -96,21 +99,15 @@ def generate_message_delay():
     Generate a random delay for message sending.
     
     Distribution:
-    - 90% of messages: delay < 300ms
-    - 10% of messages: delay between 300ms and 30 seconds
-    - Maximum delay: 30 seconds
+    - Chi-square with degrees of freedom = DELAY_CHISQ_DF
+    - Scaled by DELAY_SCALE_MS
+    - Capped at DELAY_MAX_MS
     
     Returns:
         float: Delay in seconds
     """
-    if random.random() < 0.9:
-        # 90% of messages: delay < 300ms
-        # Use uniform distribution between 0 and 300ms
-        delay_ms = random.uniform(0, 300)
-    else:
-        # 10% of messages: delay between 300ms and 30 seconds
-        delay_ms = random.uniform(300, 30000)
-    
+    delay_ms = random.gammavariate(DELAY_CHISQ_DF / 2.0, 2.0) * DELAY_SCALE_MS
+    delay_ms = min(delay_ms, DELAY_MAX_MS)
     return delay_ms / 1000.0  # Convert to seconds
 
 
@@ -407,12 +404,13 @@ if __name__ == "__main__":
         print("\nReceived interrupt signal, shutting down gracefully...")
     finally:
         # Ensure all messages are sent before exiting
-        # Wait for delayed messages (max delay is 30 seconds) plus buffer for network
+        # Wait for delayed messages (max delay is DELAY_MAX_MS) plus buffer for network
         if producer:
             try:
-                # Wait for maximum delay (30s) + buffer for network operations
+                # Wait for maximum delay + buffer for network operations
                 time.sleep(1)  # Give threads a moment to start
-                producer.flush(timeout=35)  # Wait up to 35 seconds for all messages to be sent
+                max_delay_s = max(0.0, DELAY_MAX_MS / 1000.0)
+                producer.flush(timeout=max_delay_s + 5)
             except Exception as e:
                 print(f"Warning: Error flushing producer: {e}")
             
