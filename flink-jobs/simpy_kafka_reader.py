@@ -52,6 +52,17 @@ def _to_float(value, default: float = 0.0) -> float:
         return default
 
 
+def _get_parallelism() -> int:
+    for key in ("SIMPY_PARALLELISM", "KAFKA_PARTITIONS", "KAFKA_NUM_PARTITIONS"):
+        value = os.getenv(key)
+        if value is None:
+            continue
+        parsed = _to_int(value, 0)
+        if parsed > 0:
+            return parsed
+    return 0
+
+
 def parse_message(message: str) -> Row:
     """Parse JSON message string into a Row object."""
     data = json.loads(message)
@@ -314,6 +325,10 @@ def main():
     # Enable checkpointing for exactly-once processing
     env.enable_checkpointing(10000)  # Checkpoint every 10 seconds
 
+    parallelism = _get_parallelism()
+    if parallelism > 0:
+        env.set_parallelism(parallelism)
+
     # Kafka configuration
     kafka_topic = os.getenv("KAFKA_TOPIC", "test-topic")
     kafka_bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP", "kafka:29092")
@@ -336,7 +351,10 @@ def main():
     )
 
     # Read from Kafka and parse messages
-    stream = env.add_source(kafka_source).map(lambda x: parse_message(x), output_type=row_type_info)
+    stream = env.add_source(kafka_source)
+    if parallelism > 0:
+        stream = stream.set_parallelism(parallelism)
+    stream = stream.map(lambda x: parse_message(x), output_type=row_type_info)
 
     # Assign timestamps/watermarks using start_at_ms
     watermark_strategy = WatermarkStrategy \

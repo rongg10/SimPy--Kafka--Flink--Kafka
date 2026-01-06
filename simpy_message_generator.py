@@ -24,6 +24,7 @@ DEFAULT_TOPIC = os.getenv("KAFKA_TOPIC", "test-topic")
 DELAY_MAX_MS = int(os.getenv("SIMPY_MAX_DELAY_MS", "30000"))
 DELAY_CHISQ_DF = float(os.getenv("SIMPY_DELAY_CHISQ_DF", "2.0"))
 DELAY_SCALE_MS = float(os.getenv("SIMPY_DELAY_SCALE_MS", "1000"))
+DEFAULT_IP_POOL_SIZE = os.getenv("SIMPY_IP_POOL_SIZE", "10")
 
 # Kafka Producer Configuration
 producer = None
@@ -78,12 +79,35 @@ def _ip_range(prefix: str, start: int, end: int) -> List[str]:
     return [f"{prefix}{i}" for i in range(start, end + 1)]
 
 
-# Service IP address pools (10 addresses each)
-IP_CLIENT_POOL = _ip_range("10.0.0.", 0, 9)
-IP_MAIN_POOL = _ip_range("10.1.0.", 0, 9)
-IP_SUB1_POOL = _ip_range("10.2.0.", 0, 9)
-IP_SUB2_POOL = _ip_range("10.3.0.", 0, 9)
-IP_SUB3_POOL = _ip_range("10.4.0.", 0, 9)
+def _parse_int(value, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _build_ip_pools(size: int):
+    size = max(1, int(size))
+    end = size - 1
+    return (
+        _ip_range("10.0.0.", 0, end),
+        _ip_range("10.1.0.", 0, end),
+        _ip_range("10.2.0.", 0, end),
+        _ip_range("10.3.0.", 0, end),
+        _ip_range("10.4.0.", 0, end),
+    )
+
+
+# Service IP address pools (default size is 10)
+_default_pool_size = _parse_int(DEFAULT_IP_POOL_SIZE, 10)
+IP_CLIENT_POOL, IP_MAIN_POOL, IP_SUB1_POOL, IP_SUB2_POOL, IP_SUB3_POOL = _build_ip_pools(
+    _default_pool_size
+)
+
+
+def _set_ip_pools(size: int) -> None:
+    global IP_CLIENT_POOL, IP_MAIN_POOL, IP_SUB1_POOL, IP_SUB2_POOL, IP_SUB3_POOL
+    IP_CLIENT_POOL, IP_MAIN_POOL, IP_SUB1_POOL, IP_SUB2_POOL, IP_SUB3_POOL = _build_ip_pools(size)
 
 SIM_CONFIG = {
     "print_msg": False,
@@ -359,6 +383,12 @@ if __name__ == "__main__":
     parser.add_argument("--debug", action="store_true", help="Debug mode (do not send to Kafka)")
     parser.add_argument("--topic", type=str, default=DEFAULT_TOPIC, help="Kafka topic name")
     parser.add_argument("--bootstrap", type=str, default=DEFAULT_BOOTSTRAP, help="Kafka bootstrap servers")
+    parser.add_argument(
+        "--ip-pool-size",
+        type=int,
+        default=_default_pool_size,
+        help="Number of IPs per service pool (default: SIMPY_IP_POOL_SIZE or 10)",
+    )
     args = parser.parse_args()
     
     # If --stream is set, ignore count
@@ -374,6 +404,7 @@ if __name__ == "__main__":
 
     # Update Kafka settings
     TOPIC_NAME = args.topic
+    _set_ip_pools(args.ip_pool_size)
     if args.debug:
         producer = None
     else:

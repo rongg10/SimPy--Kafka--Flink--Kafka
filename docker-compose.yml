@@ -47,8 +47,8 @@ services:
       - |
         FLINK_PROPERTIES=
         jobmanager.rpc.address: jobmanager
-        taskmanager.numberOfTaskSlots: 2
-        parallelism.default: 1
+        taskmanager.numberOfTaskSlots: 5
+        parallelism.default: 5
     volumes:
       - ./flink-jobs:/opt/flink/usrlib
       - ./flink-lib:/opt/flink/connectors
@@ -70,8 +70,8 @@ services:
       - |
         FLINK_PROPERTIES=
         jobmanager.rpc.address: jobmanager
-        taskmanager.numberOfTaskSlots: 2
-        parallelism.default: 1
+        taskmanager.numberOfTaskSlots: 5
+        parallelism.default: 5
     volumes:
       - ./flink-jobs:/opt/flink/usrlib
       - ./flink-lib:/opt/flink/connectors

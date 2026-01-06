@@ -52,16 +52,16 @@ docker exec jobmanager ./bin/flink run -py /opt/flink/usrlib/simpy_kafka_reader.
 ### 3) Generate messages (all examples use realtime)
 ```bash
 # Continuous streaming
-python simpy_message_generator.py --stream --interval 500 --realtime
+python simpy_message_generator.py --stream --interval 500 --realtime --ip-pool-size 6
 
 # Fixed count
-python simpy_message_generator.py --count 5 --interval 50 --realtime
+python simpy_message_generator.py --count 5 --interval 50 --realtime --ip-pool-size 3
 
 # Variable intervals
-python simpy_message_generator.py --count 5 --interval 100 --std-dev 200 --realtime
+python simpy_message_generator.py --count 5 --interval 100 --std-dev 200 --realtime --ip-pool-size 3
 
 # Print each message
-python simpy_message_generator.py --count 5 --interval 50 --realtime --print-msg
+python simpy_message_generator.py --count 5 --interval 50 --realtime --print-msg --ip-pool-size 3
 ```
 
 ### Simulation flags
@@ -75,6 +75,7 @@ python simpy_message_generator.py --count 5 --interval 50 --realtime --print-msg
 - `--debug`: do not send to Kafka (still simulates and logs locally).
 - `--topic NAME`: Kafka topic to publish to (default: `test-topic` or `KAFKA_TOPIC` env).
 - `--bootstrap HOSTS`: Kafka bootstrap servers (default: `localhost:9092` or `KAFKA_BOOTSTRAP` env).
+- `--ip-pool-size N`: number of IPs per service pool (default: `SIMPY_IP_POOL_SIZE` or 10).
 
 Message delivery delay is sampled from a chi-square distribution and capped:
 
@@ -90,6 +91,8 @@ docker logs taskmanager --since 1m 2>&1 | grep -E "^\+I\\["
 ```bash
 # Continuous
 docker logs -f taskmanager 2>&1 | grep -E "^\+I\[|linked_message"
+
+docker logs -f taskmanager 2>&1 | rg "\\+I\\["
 ```
 
 ## Common Commands
@@ -122,6 +125,7 @@ export KAFKA_BOOTSTRAP=kafka:29092
 export KAFKA_AUTO_OFFSET_RESET=earliest
 export SIMPY_MAX_OUT_OF_ORDER_MS=1000
 export SIMPY_IDLE_FLUSH_MS=5000
+export SIMPY_IP_POOL_SIZE=10
 ```
 
 ## Cleanup Messages in the Pipe

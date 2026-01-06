@@ -3,6 +3,7 @@ Simple Kafka to Flink read-only job using DataStream API.
 Reads messages from Kafka topic and prints them.
 """
 import json
+import os
 from pyflink.datastream import StreamExecutionEnvironment
 from pyflink.datastream.connectors import FlinkKafkaConsumer
 from pyflink.common.serialization import SimpleStringSchema
@@ -20,6 +21,20 @@ def parse_message(message: str) -> Row:
     )
 
 
+def _get_parallelism() -> int:
+    for key in ("SIMPY_PARALLELISM", "KAFKA_PARTITIONS", "KAFKA_NUM_PARTITIONS"):
+        value = os.getenv(key)
+        if value is None:
+            continue
+        try:
+            parsed = int(float(value))
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            return parsed
+    return 0
+
+
 def main():
     """Main function to set up and run the Flink job."""
     # Create a streaming execution environment
@@ -27,6 +42,10 @@ def main():
     
     # Enable checkpointing for exactly-once processing
     env.enable_checkpointing(10000)  # Checkpoint every 10 seconds
+
+    parallelism = _get_parallelism()
+    if parallelism > 0:
+        env.set_parallelism(parallelism)
     
     # Kafka configuration
     kafka_topic = "test-topic"
@@ -50,8 +69,10 @@ def main():
     )
     
     # Read from Kafka and parse messages
-    stream = env.add_source(kafka_source) \
-        .map(lambda x: parse_message(x), output_type=row_type_info)
+    stream = env.add_source(kafka_source)
+    if parallelism > 0:
+        stream = stream.set_parallelism(parallelism)
+    stream = stream.map(lambda x: parse_message(x), output_type=row_type_info)
     
     # Print the stream (this will output to Flink's stdout)
     stream.print()
@@ -62,4 +83,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
