@@ -1,150 +1,220 @@
-# Kafka to Flink Pipeline
+# Kafka 到 Flink 的链路模拟管道
 
-A SimPy → Kafka → Flink pipeline for simulating and processing distributed service call logs.
+## 项目简介
 
-## Overview
+这是一个 **SimPy → Kafka → Flink → Kafka** 的链路模拟与处理管道，用于生成分布式服务调用日志，并在 Flink 中按 IP 进行父子链路匹配与聚合。
 
-- SimPy generates service-call traces.
-- Kafka stores the raw logs.
-- Flink partitions by match IP, links parents/children, and emits results with watermarks and an idle flush.
+- SimPy 生成服务调用链并发送到 Kafka
+- Flink 按匹配 IP 分区，进行父子关系链接
+- 事件时间 Watermark + idle flush 控制输出与状态清理
 
-## Message Flow
+## 架构与数据流
 
-1. SimPy generates log entries and writes to Kafka (`test-topic`).
-2. Flink consumes Kafka, partitions by match IP, links messages, and aggregates by message id.
-3. Event-time watermarks delay emission for reciprocity, with a 60s idle flush.
+1. `simpy_message_generator.py` 生成调用日志写入 Kafka（默认 topic: `test-topic`）
+2. `flink-jobs/simpy_kafka_reader.py` 读取 Kafka，按 IP 进行父/子匹配并聚合输出
+3. 输出结果写回 Kafka 结果 Topic（`KAFKA_OUTPUT_TOPIC`），同时也会打印到 Flink 日志（stdout）
 
-## Complexity and Performance
+## 复杂度与性能
 
-### Current complexity (per IP key)
+### 当前复杂度（按 IP key）
 
-- `IpLinkingProcess`: let `N` be the number of active messages for an IP (parents + children). Each new message scans all opposite-role messages for that IP, so per-event work is `O(N)` in the worst case. Over a window, total comparisons are `O(N^2)` in the worst case (more precisely `O(P*C)` where `P` and `C` are active parents/children). Memory is `O(N)` per IP until `end_at_ms` timers or idle flush clear the state.
-- `MessageAggregationProcess`: each message id keeps one base message plus parent/child lists. Each link update rewrites a JSON list, so work is proportional to list size; total work per message is proportional to the number of links added. Memory grows with the number of linked parent/child ids until `end_at_ms` or idle flush.
-- `linking_utils.WatermarkMatcher` (test/helper): each new message compares against all buffered messages; emitting scans the buffer. That is linear per message with linear memory, and quadratic overall in the worst case if everything overlaps.
+- `IpLinkingProcess`：设 `N` 为某个 IP 下活跃消息数量（父+子）。每条新消息会扫描该 IP 下的所有相反角色消息，单条事件最坏 `O(N)`；一个窗口内总体最坏 `O(N^2)`（更精确为 `O(P*C)`）。状态内存为每 IP `O(N)`，直到 `end_at_ms` 定时器或 idle flush 清理。
+- `MessageAggregationProcess`：每个消息 id 维护基础消息+父/子列表。每次更新需要重写 JSON 列表，单次更新与列表大小成正比；每条消息总工作量与链路数量线性相关。内存随已关联的 parent/child 数增长，直到 `end_at_ms` 或 idle flush 清理。
+- `linking_utils.WatermarkMatcher`（测试/辅助）：每条消息与缓冲区全部消息比较，发射也需遍历缓冲区；单条 `O(N)`、总体最坏 `O(N^2)`，内存 `O(N)`。
 
-### What has been done to optimize performance
+### 已有的性能优化
 
-- Partitioning by matching IP keeps linking local and enables parallelism across keys.
-- Event-time watermarks (`SIMPY_MAX_OUT_OF_ORDER_MS`) and per-record `end_at_ms` timers evict old state instead of retaining it indefinitely.
-- Idle flush (`SIMPY_IDLE_FLUSH_MS`) clears inactive keys to cap memory in sparse streams.
-- Two-stage pipeline (linking → updates → aggregation) avoids repeated full-message rewrites and limits aggregation to message-id keys.
+- 按匹配 IP 分区：把串联限定在单 key 范围，提升并行度。
+- 事件时间 Watermark（`SIMPY_MAX_OUT_OF_ORDER_MS`）+ `end_at_ms` 定时器：过期状态自动清理，避免无限保留。
+- Idle flush（`SIMPY_IDLE_FLUSH_MS`）：对空闲 key 主动清理，降低稀疏流内存占用。
+- 两阶段处理（linking → updates → aggregation）：减少全量消息重复改写。
 
-### What can be done to optimize further
+## 消息格式
 
-- Replace full scans with time-bounded indexing (e.g., bucket state by `start_at_ms`/`end_at_ms`, or use an interval-join style CoProcessFunction) to avoid `O(P+C)` scans on every message.
-- Store typed objects in state instead of JSON strings to remove repeated `json.loads`/`json.dumps` per element.
-- Replace JSON list updates with `MapState`/`SetState` for parents/children to avoid decoding and rewriting the full list on each update.
-- Use state TTLs and/or a priority-queue of end times to reduce timer overhead and keep state tighter under heavy load.
-- Tune parallelism/Kafka partitions and consider a RocksDB state backend when state grows large.
+SimPy 生成的单条消息格式如下（JSON）：
 
-## How to Run
+```json
+{
+  "id": "msg_1",
+  "src_ip": "10.0.0.1",
+  "dst_ip": "10.1.0.2",
+  "start_at_ms": 1700000000000,
+  "latency_msec": 40.0,
+  "end_at_ms": 1700000000040
+}
+```
 
-### 1) Start services
+Flink 聚合后的输出会追加 `parents` / `children`：
+
+```json
+{
+  "id": "msg_1",
+  "src_ip": "10.0.0.1",
+  "dst_ip": "10.1.0.2",
+  "start_at_ms": 1700000000000,
+  "latency_msec": 40.0,
+  "end_at_ms": 1700000000040,
+  "parents": [],
+  "children": ["msg_2"]
+}
+```
+
+## 链路匹配规则
+
+父子关系匹配条件（见 `flink-jobs/linking_utils.py`）：
+
+- `parent.dst_ip == child.src_ip`
+- `parent.start_at_ms <= child.start_at_ms`
+- `parent.end_at_ms >= child.end_at_ms`
+
+## 目录结构
+
+- `docker-compose.yml`：启动 Zookeeper / Kafka / Flink
+- `Dockerfile.flink`：Flink + Python 运行环境
+- `simpy_message_generator.py`：SimPy 调用链模拟器
+- `flink-jobs/simpy_kafka_reader.py`：主 Flink 作业（链路匹配 + 聚合）
+- `flink-jobs/kafka_reader.py`：简单 Kafka 读入示例
+- `flink-jobs/linking_utils.py`：匹配规则与 watermark 工具
+- `produce_test_messages.py`：简单测试消息生产
+- `test_chain_linking.py`：纯 Python 匹配规则测试
+
+## 快速开始
+
+### 1) 启动服务
+
 ```bash
 docker compose up -d
 ```
 
-### 2) Submit the Flink job
+### 2) 提交 Flink 作业（链路匹配）
+
 ```bash
 docker exec jobmanager ./bin/flink run -py /opt/flink/usrlib/simpy_kafka_reader.py
 ```
 
-### 3) Generate messages (all examples use realtime)
+### 3) 生成模拟消息
+
 ```bash
-# Continuous streaming
+# 持续流式生成
 python simpy_message_generator.py --stream --interval 500 --realtime --ip-pool-size 6
 
-# Fixed count
+# 固定数量
 python simpy_message_generator.py --count 5 --interval 50 --realtime --ip-pool-size 3
 
-# Variable intervals
+# 带抖动
 python simpy_message_generator.py --count 5 --interval 100 --std-dev 200 --realtime --ip-pool-size 3
 
-# Print each message
+# 打印消息详情
 python simpy_message_generator.py --count 5 --interval 50 --realtime --print-msg --ip-pool-size 3
 ```
 
-### Simulation flags
+### 4) 观看输出
 
-- `--realtime`: run in wall-clock time; 1 simulation unit = 1 ms (uses `simpy.RealtimeEnvironment`).
-- `--count N`: generate N traces and exit (default: unlimited when `--stream` is used).
-- `--stream`: run continuously until interrupted; overrides `--count`.
-- `--interval MS`: mean interval between requests in milliseconds (default: 1000).
-- `--std-dev MS`: standard deviation for interval jitter; 0 disables jitter (default: 0).
-- `--print-msg`: print each generated message to stdout.
-- `--debug`: do not send to Kafka (still simulates and logs locally).
-- `--topic NAME`: Kafka topic to publish to (default: `test-topic` or `KAFKA_TOPIC` env).
-- `--bootstrap HOSTS`: Kafka bootstrap servers (default: `localhost:9092` or `KAFKA_BOOTSTRAP` env).
-- `--ip-pool-size N`: number of IPs per service pool (default: `SIMPY_IP_POOL_SIZE` or 10).
-
-Message delivery delay is sampled from a chi-square distribution and capped:
-
-- Defaults: `SIMPY_DELAY_CHISQ_DF=2.0`, `SIMPY_DELAY_SCALE_MS=1000`, `SIMPY_MAX_DELAY_MS=30000`.
-- Each log entry is delayed by `chisq(df) * scale`, then capped at `SIMPY_MAX_DELAY_MS` to simulate out-of-order delivery.
-
-### 4) Watch output
 ```bash
-# Tail
-docker logs taskmanager --since 1m 2>&1 | grep -E "^\+I\\["
+# 最近日志
+docker logs taskmanager --since 1m 2>&1 | grep -E "^\\+I\\["
+
+# 持续跟踪
+docker logs -f taskmanager 2>&1 | rg "\\+I\\[|linked_message"
 ```
 
 ```bash
-# Continuous
-docker logs -f taskmanager 2>&1 | grep -E "^\+I\[|linked_message"
-
-docker logs -f taskmanager 2>&1 | rg "\\+I\\["
+# 读取写回 Kafka 的结果
+docker exec kafka kafka-console-consumer \
+  --bootstrap-server kafka:29092 \
+  --topic linked-topic \
+  --from-beginning \
+  --max-messages 5
 ```
 
-## Common Commands
+## SimPy 生成器说明
+
+### 调用链结构
+
+当前模拟链路大致为：
+
+- Client → Main
+- Main 并行调用 SubService1 + SubService2
+- SubService2 再调用 SubService3
+- Main 可能二次调用 SubService2（约 40% 概率）
+
+### 命令行参数
+
+- `--realtime`：使用实时时钟（1 单位 = 1 ms）
+- `--count N`：生成 N 条 trace
+- `--stream`：持续生成（会覆盖 `--count`）
+- `--interval MS`：平均间隔（毫秒）
+- `--std-dev MS`：间隔抖动标准差
+- `--print-msg`：打印每条消息
+- `--debug`：不写 Kafka，仅本地模拟
+- `--topic NAME`：Kafka topic（默认 `test-topic`）
+- `--bootstrap HOSTS`：Kafka bootstrap（默认 `localhost:9092`）
+- `--ip-pool-size N`：每个服务 IP 池大小
+
+### 延迟与乱序模拟（环境变量）
+
+消息会按卡方分布加入随机延迟，用于制造乱序：
+
+- `SIMPY_DELAY_CHISQ_DF`（默认 2.0）
+- `SIMPY_DELAY_SCALE_MS`（默认 1000）
+- `SIMPY_MAX_DELAY_MS`（默认 30000）
+
+## Flink 作业说明
+
+### Watermark 与状态清理
+
+- Watermark 基于 `start_at_ms`
+- `SIMPY_MAX_OUT_OF_ORDER_MS`：最大乱序容忍
+- `SIMPY_IDLE_FLUSH_MS`：空闲 key 的清理时间
+
+### Kafka 配置（环境变量）
+
+- `KAFKA_TOPIC`：消费 topic
+- `KAFKA_OUTPUT_TOPIC`：结果写回 topic
+- `KAFKA_BOOTSTRAP`：Kafka broker
+- `KAFKA_AUTO_OFFSET_RESET`：偏移量策略
+- `SIMPY_PARALLELISM` / `KAFKA_PARTITIONS` / `KAFKA_NUM_PARTITIONS`：并行度
+
+## 常用命令
 
 ```bash
-# List running Flink jobs
+# 查看 Flink 作业
+
 docker exec jobmanager ./bin/flink list
 
-# Cancel a job
+# 取消作业
+
 docker exec jobmanager ./bin/flink cancel <job-id>
 
-# See raw Kafka messages
+# 查看 Kafka 原始消息
+
 docker exec kafka kafka-console-consumer \
   --bootstrap-server kafka:29092 \
   --topic test-topic \
   --from-beginning \
   --max-messages 5
 
-# Clean all historical TaskManager logs (recreate the container)
+# 重建 taskmanager（清日志）
+
 docker compose rm -sf taskmanager
+
 docker compose up -d taskmanager
 ```
-
-## Configuration Overrides
-
-```bash
-# Flink job tuning
-export KAFKA_TOPIC=test-topic
-export KAFKA_BOOTSTRAP=kafka:29092
-export KAFKA_AUTO_OFFSET_RESET=earliest
-export SIMPY_MAX_OUT_OF_ORDER_MS=1000
-export SIMPY_IDLE_FLUSH_MS=5000
-export SIMPY_IP_POOL_SIZE=10
-```
-
-## Cleanup Messages in the Pipe
-
-```bash
-# Delete the Kafka topic (messages are removed; auto-created on next produce)
-docker exec kafka kafka-topics --bootstrap-server kafka:29092 --delete --topic test-topic
-
-# Optional: reset the Flink consumer group offsets
-docker exec kafka kafka-consumer-groups --bootstrap-server kafka:29092 --delete --group flink-simpy-consumer-group
-```
-
-## Next Steps
-
-- Add aggregations or windowed latency metrics in Flink.
-- Write linked output to a sink (database, file system).
-- Tune watermark delay and idle flush duration for your traffic patterns.
 
 ## 已进行的测试
 
 - 普通fixed count, 及不同count, interval, std-dev, print-msg, realtime等
 - 高压流十分钟，interval 50高并发，每分钟约6000多条，约等于一天800多万条
+
+## 本地测试
+
+无需 Flink/Kafka，可直接验证匹配逻辑：
+
+```bash
+python test_chain_linking.py
+```
+
+## 备注
+
+- Kafka 端口：`localhost:9092`（宿主机访问） / `kafka:29092`（容器内访问）
+- Flink UI：`http://localhost:8081`

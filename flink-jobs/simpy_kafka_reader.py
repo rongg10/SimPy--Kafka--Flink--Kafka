@@ -13,7 +13,8 @@ import os
 from typing import List
 
 from pyflink.datastream import StreamExecutionEnvironment
-from pyflink.datastream.connectors import FlinkKafkaConsumer
+from pyflink.datastream.connectors import FlinkKafkaConsumer, FlinkKafkaProducer
+from pyflink.datastream.connectors.kafka import Semantic
 from pyflink.datastream.functions import KeyedProcessFunction, TimeDomain
 from pyflink.datastream.state import MapStateDescriptor, ValueStateDescriptor
 from pyflink.common.serialization import SimpleStringSchema
@@ -331,6 +332,7 @@ def main():
 
     # Kafka configuration
     kafka_topic = os.getenv("KAFKA_TOPIC", "test-topic")
+    kafka_output_topic = os.getenv("KAFKA_OUTPUT_TOPIC", "linked-topic")
     kafka_bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP", "kafka:29092")
 
     # Define the schema for the messages
@@ -388,6 +390,16 @@ def main():
 
     # Print the linked stream (this will output to Flink's stdout)
     linked_stream.print()
+
+    # Write linked results back to Kafka for downstream consumers.
+    linked_json_stream = linked_stream.map(lambda x: x[0], output_type=Types.STRING())
+    kafka_sink = FlinkKafkaProducer(
+        topic=kafka_output_topic,
+        serialization_schema=SimpleStringSchema(),
+        producer_config={"bootstrap.servers": kafka_bootstrap_servers},
+        semantic=Semantic.AT_LEAST_ONCE,
+    )
+    linked_json_stream.add_sink(kafka_sink)
 
     # Execute the job
     env.execute("SimPy Kafka Reader - DataStream API with Chain Linking")
