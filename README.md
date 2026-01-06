@@ -2,7 +2,7 @@
 
 ## 项目简介
 
-这是一个 **SimPy → Kafka → Flink → Kafka** 的链路模拟与处理管道，用于生成分布式服务调用日志，并在 Flink 中按 IP 进行父子链路匹配与聚合。
+这是一个 **SimPy → Kafka → Flink → Kafka** 的链路模拟与处理管道，用于生成分布式服务调用日志，并在 Flink 中按 IP 进行父子链路匹配与聚合。项目具体要求来自@requirements-v2.md。
 
 - SimPy 生成服务调用链并发送到 Kafka
 - Flink 按匹配 IP 分区，进行父子关系链接
