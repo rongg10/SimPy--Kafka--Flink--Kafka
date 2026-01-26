@@ -128,24 +128,25 @@ def generate_message_delay():
     - Capped at DELAY_MAX_MS
     
     Returns:
-        float: Delay in seconds
+        float: Delay in milliseconds (simulation time units)
     """
     delay_ms = random.gammavariate(DELAY_CHISQ_DF / 2.0, 2.0) * DELAY_SCALE_MS
     delay_ms = min(delay_ms, DELAY_MAX_MS)
-    return delay_ms / 1000.0  # Convert to seconds
+    return delay_ms
 
 
-def send_message_with_delay(log_entry, delay_seconds):
+def send_message_with_delay(env, log_entry, delay_ms):
     """
     Send a message to Kafka after a specified delay.
     
-    This function runs in a separate thread to avoid blocking the simulation.
+    This function runs as a SimPy process; the Kafka send itself is synchronous.
     
     Args:
+        env: SimPy environment
         log_entry: The message to send
-        delay_seconds: Delay in seconds before sending
+        delay_ms: Delay in milliseconds before sending (simulation time units)
     """
-    time.sleep(delay_seconds)
+    yield env.timeout(delay_ms)
     
     if not SIM_CONFIG.get("debug") and producer:
         try:
@@ -203,15 +204,13 @@ def log_service_call(func):
         }
 
         # Send log to Kafka with random delay to cause out-of-order delivery
-        # The delay is applied in a separate thread to avoid blocking the simulation
-        delay_seconds = generate_message_delay()
-        thread = threading.Thread(target=send_message_with_delay, args=(log_entry, delay_seconds))
-        thread.daemon = True  # Allow program to exit even if thread is still running
-        thread.start()
+        # The delay is scheduled as a SimPy process.
+        delay_ms = generate_message_delay()
+        self.env.process(send_message_with_delay(self.env, log_entry, delay_ms))
 
         # Print message if enabled
         if SIM_CONFIG["print_msg"]:
-            print(f"Message: {log_entry} (will be sent after {delay_seconds*1000:.2f}ms delay)")
+            print(f"Message: {log_entry} (will be sent after {delay_ms:.2f}ms delay)")
 
     return wrapper
 
